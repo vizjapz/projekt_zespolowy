@@ -246,6 +246,41 @@ kubectl get nodes
 
 ---
 
+## Trwałość danych
+
+### Gdzie przechowywane są dane instancji WordPress
+
+Każda instancja WordPress składa się z dwóch warstw danych, obie trwałe i odporne na restarty:
+
+**1. Stan klastra — etcd**
+
+Kubernetes przechowuje pełen stan wszystkich obiektów (Namespace, Deployment, Service, Ingress, Secret, PVC, certyfikaty TLS) w wbudowanej bazie etcd na węźle master. Dane te są zapisywane na dysku i przeżywają restart k3s oraz restart maszyny. Po ponownym uruchomieniu klastra wszystkie instancje WordPress wracają automatycznie do stanu sprzed zatrzymania.
+
+**2. Pliki i baza danych — PersistentVolume**
+
+Dane aplikacji (pliki WordPress, motywy, wtyczki, przesłane media) oraz zawartość bazy MySQL są przechowywane w PersistentVolumes zarządzanych przez `local-path-provisioner`. Fizyczna lokalizacja na węźle:
+
+```
+/var/lib/rancher/k3s/storage/
+```
+
+Wolumeny nie są usuwane przy restarcie podów ani węzłów — Kubernetes montuje je ponownie przy każdym uruchomieniu kontenera. Dane przeżywają również aktualizację obrazu Docker (np. zmianę wersji PHP) ponieważ wolumin jest przyłączany niezależnie od cyklu życia kontenera.
+
+**3. Panel administracyjny — bezstanowy**
+
+Panel WordPress (`wp-panel`) nie posiada własnej bazy danych. Lista aktywnych instancji jest odczytywana na żywo z API Kubernetes przy każdym załadowaniu strony. Restart usługi `wp-panel` lub restart węzła master nie powoduje utraty żadnych danych — panel po prostu ponownie odpytuje klaster i wyświetla aktualny stan.
+
+### Cykl życia danych
+
+| Zdarzenie | Skutek dla danych |
+|-----------|-------------------|
+| Restart poda WordPress / MySQL | Dane zachowane — wolumin montowany ponownie |
+| Restart węzła k3s | Dane zachowane — pody startują automatycznie |
+| Restart całego klastra | Dane zachowane — etcd i wolumeny na dysku |
+| Usunięcie instancji przez panel | Dane **usuwane** — `kubectl delete namespace` usuwa PVC i wolumeny |
+
+---
+
 ## Co daje k3s out-of-the-box
 
 | Komponent | Opis |
