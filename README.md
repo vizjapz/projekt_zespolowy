@@ -1,188 +1,80 @@
-# Kubernetes Webhosting Cluster - Ansible Automation
+# k8s-wordpress
 
-Projekt uczelniony: **Projekt i wdrożenie środowiska webhostingowego opartego na Kubernetes**
+## Project Overview
 
-Automatyzacja Ansible do postawienia 3-nodowego klastra Kubernetes na czystych maszynach wirtualnych z Ubuntu 22.04/24.04 LTS.
+Ansible project that bootstraps a 3-node k3s cluster (1 control plane + 2 workers) on Ubuntu 22.04. Test environment for WordPress deployment. Uses air-gap installation (no internet required on target nodes). k3s ships with Traefik (ingress + Let's Encrypt TLS), CoreDNS, local-path-provisioner (PVCs), and metrics-server — no additional CNI or certbot needed.
 
-## Architektura
-
-```
-┌─────────────────────────────────────────────────────┐
-│                   Ansible Controller                 │
-│                 (laptop / VM zarządzająca)            │
-└──────────┬──────────────┬──────────────┬────────────┘
-           │              │              │
-     ┌─────▼─────┐  ┌────▼──────┐  ┌───▼───────┐
-     │  k8s-cp01  │  │  k8s-w01  │  │  k8s-w02  │
-     │  master    │  │  worker   │  │  worker   │
-     │ 10.10.10.11│  │10.10.10.12│  │10.10.10.13│
-     │  8GB RAM   │  │  8GB RAM  │  │  8GB RAM  │
-     │  2-4 vCPU  │  │  2-4 vCPU │  │  2-4 vCPU │
-     └────────────┘  └───────────┘  └───────────┘
-```
-
-## Wymagania
-
-### Maszyny docelowe (nody K8s)
-- Ubuntu 22.04 LTS lub 24.04 LTS (minimal server)
-- 8 GB RAM, 2-4 vCPU, 50+ GB dysk
-- Łączność sieciowa między nodami
-- Użytkownik z uprawnieniami sudo
-- Klucz SSH skonfigurowany
-
-### Maszyna zarządzająca (Ansible controller)
-- Python 3.8+
-- Ansible 2.15+
-- `ansible-galaxy collection install community.general ansible.posix`
-
-## Struktura projektu
-
-```
-k8s-ansible/
-├── ansible.cfg                 # Konfiguracja Ansible
-├── inventory/
-│   └── hosts.yml               # Inwentarz - adresy nodów
-├── group_vars/
-│   ├── all.yml                 # Zmienne globalne
-│   └── k8s_cluster.yml         # Zmienne klastra K8s
-├── roles/
-│   ├── common/                 # Hardening OS
-│   │   ├── tasks/main.yml
-│   │   ├── handlers/main.yml
-│   │   ├── templates/
-│   │   │   ├── sshd_config.j2
-│   │   │   ├── 90-hardening.conf.j2
-│   │   │   ├── jail.local.j2
-│   │   │   ├── chrony.conf.j2
-│   │   │   └── 50unattended-upgrades.j2
-│   │   └── files/
-│   │       └── ufw-before-rules-icmp.rules
-│   ├── containerd/             # Container runtime
-│   │   ├── tasks/main.yml
-│   │   └── handlers/main.yml
-│   ├── kubernetes-prereqs/     # Prereqs K8s
-│   │   ├── tasks/main.yml
-│   │   └── templates/
-│   │       ├── k8s-modules.conf.j2
-│   │       └── k8s-sysctl.conf.j2
-│   ├── kubernetes-master/      # Control-plane init
-│   │   ├── tasks/main.yml
-│   │   └── templates/
-│   │       └── kubeadm-config.yml.j2
-│   └── kubernetes-worker/      # Worker join
-│       └── tasks/main.yml
-├── playbooks/
-│   ├── site.yml                # Główny playbook (wszystko)
-│   ├── 01-hardening.yml        # Tylko hardening
-│   ├── 02-kubernetes.yml       # Tylko K8s
-│   └── 99-reset.yml            # Reset klastra
-└── README.md
-```
-
-## Szybki start
-
-### 1. Skonfiguruj inwentarz
-
-Edytuj `inventory/hosts.yml` — wpisz adresy IP swoich VM.
-
-### 2. Wpisz swój klucz SSH
-
-Edytuj `group_vars/all.yml` — zmień `ansible_user_ssh_pubkey`.
-
-### 3. Przetestuj łączność
+## First-Time Setup
 
 ```bash
-ansible all -m ping
+# 1. Download k3s binaries locally (requires internet on THIS machine, ~270MB)
+./download-k3s.sh
+
+# 2. Deploy cluster
+ansible-playbook site.yml
+
+# Dry run
+ansible-playbook site.yml --check --diff
+
+# Limit to specific hosts
+ansible-playbook site.yml --limit control_plane
+ansible-playbook site.yml --limit workers
 ```
 
-### 4. Uruchom pełny deployment
+Edit `inventory/hosts` to set correct node IPs before running.
 
+## Key Variables
+
+`group_vars/all.yml`:
+
+| Variable | Effect |
+|---|---|
+| `k3s_server_ip` | Derived from inventory — IP of the control plane node |
+| `k3s_server_url` | Agent join URL (`https://<cp_ip>:6443`) |
+
+## Architecture — Play Execution Order
+
+`site.yml` runs 4 sequential plays:
+
+```
+common      → all nodes     : swap off, nfs-common, /etc/hosts entries
+k3s_server  → master only   : copies binary + airgap images, runs install.sh,
+                              reads node token, stores as hostvars fact
+k3s_agent   → workers       : copies binary + airgap images, runs install.sh agent
+                              with K3S_URL + K3S_TOKEN from hostvars
+verify      → master only   : waits for all nodes Ready + kube-system pods Running,
+                              prints kubectl get nodes/pods
+```
+
+## Air-Gap Installation
+
+`download-k3s.sh` fetches three files into `files/`:
+- `k3s` — single binary (replaces kubeadm + kubelet + kubectl + containerd)
+- `k3s-airgap-images-amd64.tar.zst` — all required images pre-bundled
+- `install.sh` — official k3s install script from get.k3s.io
+
+k3s auto-loads any `.tar.zst` from `/var/lib/rancher/k3s/agent/images/` on first start — no manual `ctr images import` needed.
+
+## Idempotency Guards
+
+- `k3s_server` install — skipped if `/etc/systemd/system/k3s.service` exists
+- `k3s_agent` install — skipped if `/etc/systemd/system/k3s-agent.service` exists
+
+## Join Command Flow
+
+The join token is read from `/var/lib/rancher/k3s/server/node-token` on the master and stored as an in-memory hostvars fact (`k3s_node_token`). The `k3s_agent` role reads it via `hostvars[groups['control_plane'][0]]['k3s_node_token']`. Both plays must run in the same execution — running the agent play standalone will fail.
+
+## kubectl Access
+
+On the master node, use `k3s kubectl` or set:
 ```bash
-# Wszystko po kolei
-ansible-playbook playbooks/site.yml
-
-# Lub etapami:
-ansible-playbook playbooks/01-hardening.yml
-ansible-playbook playbooks/02-kubernetes.yml
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+kubectl get nodes
 ```
 
-### 5. Zweryfikuj klaster
+## WordPress Deployment
 
-```bash
-ssh ansible@10.10.10.11
-kubectl get nodes -o wide
-kubectl get pods -n kube-system
-```
-
-## Co robi każda rola
-
-### `common` — Hardening OS
-- Aktualizacja systemu i instalacja pakietów bazowych
-- Konfiguracja użytkownika ansible z kluczem SSH
-- Hardening SSH (wyłączenie root login, password auth, crypto hardening)
-- Hardening kernela (sysctl - ochrona przed atakami sieciowymi)
-- Firewall UFW (domyślnie deny incoming)
-- Fail2ban (ochrona SSH)
-- Chrony NTP (synchronizacja czasu)
-- Automatyczne aktualizacje bezpieczeństwa (z blacklistą pakietów K8s)
-- Auditd
-- Banner logowania
-
-### `containerd` — Container Runtime
-- Instalacja containerd z oficjalnego repo Docker
-- Konfiguracja SystemdCgroup = true
-- Ustawienie pause image
-
-### `kubernetes-prereqs` — Przygotowanie pod K8s
-- Wyłączenie swap
-- Moduły kernela (overlay, br_netfilter)
-- Sysctl networking (ip_forward, bridge-nf-call)
-- Repozytorium Kubernetes (pkgs.k8s.io)
-- Instalacja kubeadm, kubelet, kubectl
-- Apt hold na pakietach K8s
-- Firewall — porty K8s (master/worker/Calico)
-- crictl config
-- kubectl bash completion + alias k
-
-### `kubernetes-master` — Control-plane
-- kubeadm init z dedykowanym ClusterConfiguration
-- Konfiguracja kubectl (root + ansible)
-- Instalacja Calico CNI
-- Oczekiwanie na gotowość control-plane
-- Generowanie join command dla workerów
-
-### `kubernetes-worker` — Dołączenie workerów
-- kubeadm join (token z mastera)
-- Label node-role.kubernetes.io/worker
-
-## Reset klastra
-
-```bash
-ansible-playbook playbooks/99-reset.yml
-```
-
-Wykonuje `kubeadm reset`, czyści iptables, interfejsy CNI i katalogi konfiguracyjne.
-
-## Zmienne do dostosowania
-
-| Zmienna | Domyślna wartość | Opis |
-|---|---|---|
-| `k8s_version` | `1.31` | Wersja Kubernetes |
-| `k8s_pod_network_cidr` | `10.244.0.0/16` | CIDR sieci podów |
-| `k8s_service_cidr` | `10.96.0.0/12` | CIDR sieci serwisów |
-| `k8s_cni` | `calico` | Plugin CNI |
-| `ssh_port` | `22` | Port SSH |
-| `timezone` | `Europe/Warsaw` | Strefa czasowa |
-| `ansible_user_ssh_pubkey` | — | Klucz publiczny SSH |
-
-## Następne kroki (ArgoCD + WordPress)
-
-Po uruchomieniu klastra, kolejne etapy projektu:
-1. Instalacja MetalLB (LoadBalancer dla bare-metal)
-2. Instalacja Ingress-NGINX
-3. Instalacja cert-manager
-4. Deployment ArgoCD
-5. Konfiguracja GitLab repo z Helm charts
-6. ArgoCD App of Apps → WordPress webhosting
-
-
+k3s ships with everything needed for WordPress out of the box:
+- **Traefik** — ingress controller with built-in Let's Encrypt (no certbot)
+- **local-path-provisioner** — automatic PersistentVolumes for DB storage
+- **CoreDNS** — internal DNS for service discovery

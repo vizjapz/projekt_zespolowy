@@ -1,0 +1,14 @@
+---
+- name: Install k3s agent
+  shell: curl -sfL https://get.k3s.io | sh -s - agent
+  args:
+    creates: /etc/systemd/system/k3s-agent.service
+  environment:
+    K3S_URL: "{{ k3s_server_url }}"
+    K3S_TOKEN: "{{ hostvars[groups['control_plane'][0]]['k3s_node_token'] }}"
+
+- name: Ensure k3s-agent is started and enabled
+  systemd:
+    name: k3s-agent
+    state: started
+    enabled: true

@@ -1,0 +1,9 @@
+k8s_key
+k8s_key.pub
+dashboard-token.txt
+files/k3s
+files/k3s-airgap-images-amd64.tar.zst
+files/install.sh
+*.retry
+.DS_Store
+.claude/

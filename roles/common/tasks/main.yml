@@ -1,0 +1,32 @@
+---
+- name: Update apt cache
+  apt:
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Install basic dependencies
+  apt:
+    name:
+      - curl
+      - ca-certificates
+      - nfs-common
+    state: present
+
+- name: Disable swap (runtime)
+  command: swapoff -a
+  changed_when: false
+
+- name: Disable swap (fstab)
+  replace:
+    path: /etc/fstab
+    regexp: '^([^#].*\s+swap\s+.*)$'
+    replace: '# \1'
+
+- name: Add cluster nodes to /etc/hosts
+  blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} ANSIBLE MANAGED - k3s cluster"
+    block: |
+      {{ hostvars['k8s-master'].ansible_host }}   k8s-master
+      {{ hostvars['k8s-worker1'].ansible_host }}   k8s-worker1
+      {{ hostvars['k8s-worker2'].ansible_host }}   k8s-worker2

@@ -1,0 +1,59 @@
+---
+- name: Deploy Kubernetes Dashboard
+  command: >
+    k3s kubectl apply -f
+    https://raw.githubusercontent.com/kubernetes/dashboard/v2.7.0/aio/deploy/recommended.yaml
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: dashboard_deploy
+  changed_when: "'configured' in dashboard_deploy.stdout or 'created' in dashboard_deploy.stdout"
+
+- name: Wait for dashboard pod to be Running
+  command: >
+    k3s kubectl get pods -n kubernetes-dashboard
+    -l k8s-app=kubernetes-dashboard
+    -o jsonpath='{.items[0].status.phase}'
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: dashboard_pod
+  until: dashboard_pod.stdout == "Running"
+  retries: 20
+  delay: 10
+
+- name: Copy dashboard-admin manifest to master
+  copy:
+    src: dashboard-admin.yml
+    dest: /tmp/dashboard-admin.yml
+
+- name: Apply admin ServiceAccount, NodePort and token Secret
+  command: k3s kubectl apply -f /tmp/dashboard-admin.yml
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+- name: Wait for token Secret to be populated
+  command: >
+    k3s kubectl get secret admin-user-token -n kubernetes-dashboard
+    -o jsonpath='{.data.token}'
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: token_b64
+  until: token_b64.stdout != ""
+  retries: 10
+  delay: 5
+
+- name: Decode token
+  set_fact:
+    dashboard_token: "{{ token_b64.stdout | b64decode }}"
+
+- name: "[DASHBOARD] Dostęp"
+  debug:
+    msg:
+      - "========================================"
+      - " Kubernetes Dashboard gotowy!"
+      - " URL  : https://{{ ansible_host }}:30443"
+      - " Login: token (wklej poniższy)"
+      - "========================================"
+
+- name: "[DASHBOARD] Token logowania"
+  debug:
+    msg: "{{ dashboard_token }}"

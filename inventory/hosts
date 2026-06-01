@@ -1,0 +1,15 @@
+[control_plane]
+k8s-master ansible_host=10.4.0.50
+
+[workers]
+k8s-worker1 ansible_host=10.4.0.51
+k8s-worker2 ansible_host=10.4.0.52
+
+[k8s_cluster:children]
+control_plane
+workers
+
+[k8s_cluster:vars]
+ansible_user=root
+ansible_python_interpreter=/usr/bin/python3
+ansible_ssh_private_key_file={{ playbook_dir }}/k8s_key

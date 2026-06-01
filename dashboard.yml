@@ -1,0 +1,5 @@
+---
+- name: Deploy Kubernetes Dashboard
+  hosts: control_plane
+  roles:
+    - dashboard

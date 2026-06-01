@@ -1,0 +1,51 @@
+---
+- name: Wait for all nodes to join and become Ready
+  command: k3s kubectl get nodes --no-headers
+  register: nodes_output
+  until:
+    - nodes_output.stdout_lines | length == groups['k8s_cluster'] | length
+    - "'NotReady' not in nodes_output.stdout"
+  retries: 30
+  delay: 10
+
+- name: Get node details
+  command: k3s kubectl get nodes -o wide
+  register: nodes_wide
+
+- name: "[VERIFY] Node status"
+  debug:
+    msg: "{{ nodes_wide.stdout_lines }}"
+
+- name: Wait for system pods to be Running
+  command: k3s kubectl get pods -n kube-system --no-headers
+  register: system_pods_output
+  until:
+    - system_pods_output.stdout != ""
+    - "'Pending'           not in system_pods_output.stdout"
+    - "'Init:'             not in system_pods_output.stdout"
+    - "'ContainerCreating' not in system_pods_output.stdout"
+    - "'CrashLoopBackOff'  not in system_pods_output.stdout"
+    - "'Error'             not in system_pods_output.stdout"
+  retries: 30
+  delay: 10
+
+- name: Get all pods across all namespaces
+  command: k3s kubectl get pods --all-namespaces -o wide
+  register: all_pods_output
+
+- name: "[VERIFY] Pod status (all namespaces)"
+  debug:
+    msg: "{{ all_pods_output.stdout_lines }}"
+
+- name: "[VERIFY] Cluster summary"
+  debug:
+    msg:
+      - "==============================="
+      - " Klaster k3s gotowy!"
+      - " Węzłów łącznie : {{ nodes_output.stdout_lines | length }}"
+      - " Wszystkie węzły: Ready"
+      - " Pody systemowe : Running"
+      - " Ingress        : Traefik (wbudowany)"
+      - " TLS            : Let's Encrypt przez Traefik"
+      - " Storage        : local-path-provisioner"
+      - "==============================="
