@@ -1,80 +1,276 @@
 # k8s-wordpress
 
-## Project Overview
+Projekt uczelniony: **Wdrożenie środowiska webhostingowego opartego na Kubernetes (k3s)**
 
-Ansible project that bootstraps a 3-node k3s cluster (1 control plane + 2 workers) on Ubuntu 22.04. Test environment for WordPress deployment. Uses air-gap installation (no internet required on target nodes). k3s ships with Traefik (ingress + Let's Encrypt TLS), CoreDNS, local-path-provisioner (PVCs), and metrics-server — no additional CNI or certbot needed.
+Automatyzacja Ansible stawiająca 3-nodowy klaster k3s na czystych maszynach Ubuntu 22.04/24.04.
+Środowisko docelowe: deploy aplikacji WordPress z bazą MySQL, Traefik ingress i TLS.
 
-## First-Time Setup
+---
+
+## Topologia
+
+```
+                    ┌─────────────────────────────────┐
+                    │        Ansible Controller        │
+                    │    (laptop / maszyna lokalna)    │
+                    │                                  │
+                    │  ansible-playbook site.yml       │
+                    └──────┬──────────┬───────────┬───┘
+                    SSH    │          │           │
+                    klucz  │          │           │
+                    k8s_key│          │           │
+                           │          │           │
+          ┌────────────────▼──┐  ┌────▼──────┐  ┌▼──────────┐
+          │    k8s-cp1        │  │  k8s-w01  │  │  k8s-w02  │
+          │  control-plane    │  │  worker   │  │  worker   │
+          │   10.4.0.50       │  │ 10.4.0.51 │  │ 10.4.0.52 │
+          │                   │  │           │  │           │
+          │  k3s server       │  │ k3s agent │  │ k3s agent │
+          │  etcd (embedded)  │  │           │  │           │
+          │  CoreDNS          │  │           │  │           │
+          │  Traefik          │  │           │  │           │
+          │  local-path-prov. │  │           │  │           │
+          │  metrics-server   │  │           │  │           │
+          └───────────────────┘  └───────────┘  └───────────┘
+```
+
+### Sieć klastra
+
+| Sieć | CIDR | Opis |
+|------|------|------|
+| Węzły (fizyczna) | `10.4.0.0/24` | Sieć VM — komunikacja Ansible i k3s |
+| Pody (k3s flannel) | `10.42.0.0/16` | Sieć wewnętrzna podów |
+| Serwisy (ClusterIP) | `10.43.0.0/16` | Sieć wewnętrzna serwisów |
+
+### Porty wymagane między węzłami
+
+| Port | Protokół | Kierunek | Opis |
+|------|----------|----------|------|
+| `6443` | TCP | worker → master | k3s API server |
+| `8472` | UDP | wszystkie | Flannel VXLAN (sieć podów) |
+| `10250` | TCP | master → worker | kubelet metrics |
+| `30443` | TCP | zewnątrz → master | Kubernetes Dashboard (NodePort) |
+| `80 / 443` | TCP | zewnątrz → all | Traefik HTTP/HTTPS |
+
+---
+
+## Wymagania
+
+### Maszyny docelowe
+- Ubuntu 22.04 LTS lub 24.04 LTS (minimal server)
+- min. 2 GB RAM, 2 vCPU, 20 GB dysk
+- Dostęp SSH jako `root` (lub użytkownik z `sudo`)
+- Łączność sieciowa między węzłami
+
+### Maszyna zarządzająca (Ansible controller)
+- Python 3.8+
+- Ansible 2.14+
+- `curl` (do `download-k3s.sh`)
+
+---
+
+## Struktura projektu
+
+```
+k8s-ansible/
+│
+├── site.yml                         # główny playbook — 4 sequential plays
+├── dashboard.yml                    # osobny playbook — Kubernetes Dashboard (opcjonalny)
+├── download-k3s.sh                  # pobiera k3s binary + airgap images lokalnie (~310 MB)
+│
+├── inventory/
+│   └── hosts                        # INI: grupy control_plane / workers / k8s_cluster:children
+│
+├── group_vars/
+│   └── all.yml                      # k3s_server_ip (z inventory), k3s_server_url (https://CP:6443)
+│
+├── files/
+│   └── .gitkeep                     # placeholder — download-k3s.sh wrzuca tu pliki (nie w repo)
+│
+└── roles/
+    │
+    ├── common/
+    │   └── tasks/
+    │       └── main.yml             # apt update, curl+nfs-common, swapoff + fstab, /etc/hosts
+    │
+    ├── k3s_server/
+    │   └── tasks/
+    │       └── main.yml             # curl install.sh → k3s server, czeka na node-token,
+    │                                # slurp tokenu → set_fact k3s_node_token, czeka na Ready
+    │
+    ├── k3s_agent/
+    │   └── tasks/
+    │       └── main.yml             # curl install.sh agent z K3S_URL + K3S_TOKEN (z hostvars mastera)
+    │
+    ├── verify/
+    │   └── tasks/
+    │       └── main.yml             # czeka aż 3/3 węzłów Ready, czeka na pody kube-system Running,
+    │                                # wyświetla kubectl get nodes -o wide + pods -A
+    │
+    └── dashboard/
+        ├── tasks/
+        │   └── main.yml             # kubectl apply recommended.yaml (v2.7.0), ServiceAccount admin,
+        │                            # NodePort 30443, slurp tokenu → debug URL + token
+        └── files/
+            └── dashboard-admin.yml  # manifesty: ServiceAccount, ClusterRoleBinding (cluster-admin),
+                                     # Secret (service-account-token), Service NodePort 30443
+```
+
+---
+
+## Kolejność wykonania playbooków
+
+### `site.yml` — 4 plays
+
+```
+Play 1: common       → k8s_cluster (wszystkie 3 nody)
+        ├─ apt update + instalacja curl, nfs-common
+        ├─ swapoff -a + wykomentowanie swap w /etc/fstab
+        └─ wpisy w /etc/hosts (k8s-master, k8s-worker1, k8s-worker2)
+
+Play 2: k3s_server   → control_plane (10.4.0.50)
+        ├─ curl -sfL https://get.k3s.io | sh -
+        ├─ wait_for: /var/lib/rancher/k3s/server/node-token
+        ├─ slurp tokenu → set_fact k3s_node_token
+        └─ wait: node Ready (retry 20x co 10s)
+
+Play 3: k3s_agent    → workers (10.4.0.51, 10.4.0.52)
+        ├─ curl install.sh z K3S_URL + K3S_TOKEN z hostvars[master]
+        └─ systemd: k3s-agent started + enabled
+
+Play 4: verify       → control_plane
+        ├─ wait: 3/3 węzłów Ready (retry 30x co 10s)
+        ├─ debug: kubectl get nodes -o wide
+        ├─ wait: pody kube-system Running
+        └─ debug: kubectl get pods -A + podsumowanie
+```
+
+### `dashboard.yml` — osobny playbook
+
+```
+Play 1: dashboard    → control_plane
+        ├─ kubectl apply dashboard v2.7.0 (namespace kubernetes-dashboard)
+        ├─ wait: pod dashboard Running
+        ├─ kubectl apply dashboard-admin.yml
+        │    ├─ ServiceAccount: admin-user
+        │    ├─ ClusterRoleBinding: admin-user → cluster-admin
+        │    ├─ Secret: admin-user-token (service-account-token)
+        │    └─ Service: NodePort 30443 → dashboard:8443
+        └─ debug: URL (https://10.4.0.50:30443) + token logowania
+```
+
+---
+
+## Szybki start
+
+### 1. Skonfiguruj inventory
+
+```ini
+# inventory/hosts
+[control_plane]
+k8s-master ansible_host=10.4.0.50
+
+[workers]
+k8s-worker1 ansible_host=10.4.0.51
+k8s-worker2 ansible_host=10.4.0.52
+```
+
+### 2. Wgraj klucz SSH na serwery
 
 ```bash
-# 1. Download k3s binaries locally (requires internet on THIS machine, ~270MB)
-./download-k3s.sh
+# Wygeneruj klucz (jeśli nie masz)
+ssh-keygen -t ed25519 -f k8s_key -N ""
 
-# 2. Deploy cluster
+# Wgraj na każdy węzeł
+for NODE in 10.4.0.50 10.4.0.51 10.4.0.52; do
+  ssh-copy-id -i k8s_key.pub root@$NODE
+done
+```
+
+### 3. Sprawdź połączenie
+
+```bash
+ansible all -m ping
+```
+
+### 4. Uruchom klaster
+
+```bash
 ansible-playbook site.yml
-
-# Dry run
-ansible-playbook site.yml --check --diff
-
-# Limit to specific hosts
-ansible-playbook site.yml --limit control_plane
-ansible-playbook site.yml --limit workers
 ```
 
-Edit `inventory/hosts` to set correct node IPs before running.
+### 5. (Opcjonalnie) Kubernetes Dashboard
 
-## Key Variables
-
-`group_vars/all.yml`:
-
-| Variable | Effect |
-|---|---|
-| `k3s_server_ip` | Derived from inventory — IP of the control plane node |
-| `k3s_server_url` | Agent join URL (`https://<cp_ip>:6443`) |
-
-## Architecture — Play Execution Order
-
-`site.yml` runs 4 sequential plays:
-
-```
-common      → all nodes     : swap off, nfs-common, /etc/hosts entries
-k3s_server  → master only   : copies binary + airgap images, runs install.sh,
-                              reads node token, stores as hostvars fact
-k3s_agent   → workers       : copies binary + airgap images, runs install.sh agent
-                              with K3S_URL + K3S_TOKEN from hostvars
-verify      → master only   : waits for all nodes Ready + kube-system pods Running,
-                              prints kubectl get nodes/pods
-```
-
-## Air-Gap Installation
-
-`download-k3s.sh` fetches three files into `files/`:
-- `k3s` — single binary (replaces kubeadm + kubelet + kubectl + containerd)
-- `k3s-airgap-images-amd64.tar.zst` — all required images pre-bundled
-- `install.sh` — official k3s install script from get.k3s.io
-
-k3s auto-loads any `.tar.zst` from `/var/lib/rancher/k3s/agent/images/` on first start — no manual `ctr images import` needed.
-
-## Idempotency Guards
-
-- `k3s_server` install — skipped if `/etc/systemd/system/k3s.service` exists
-- `k3s_agent` install — skipped if `/etc/systemd/system/k3s-agent.service` exists
-
-## Join Command Flow
-
-The join token is read from `/var/lib/rancher/k3s/server/node-token` on the master and stored as an in-memory hostvars fact (`k3s_node_token`). The `k3s_agent` role reads it via `hostvars[groups['control_plane'][0]]['k3s_node_token']`. Both plays must run in the same execution — running the agent play standalone will fail.
-
-## kubectl Access
-
-On the master node, use `k3s kubectl` or set:
 ```bash
-export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+ansible-playbook dashboard.yml
+# Otwórz: https://10.4.0.50:30443
+```
+
+---
+
+## Zmienne (`group_vars/all.yml`)
+
+| Zmienna | Wartość | Opis |
+|---------|---------|------|
+| `k3s_server_ip` | `{{ hostvars[groups['control_plane'][0]]['ansible_host'] }}` | IP mastera — pobierane z inventory |
+| `k3s_server_url` | `https://{{ k3s_server_ip }}:6443` | URL dla agentów do dołączenia |
+
+---
+
+## Idempotentność
+
+Każdy destruktywny krok jest zabezpieczony:
+
+| Krok | Guard |
+|------|-------|
+| Instalacja k3s server | `creates: /etc/systemd/system/k3s.service` |
+| Instalacja k3s agent | `creates: /etc/systemd/system/k3s-agent.service` |
+| Wyłączenie swap w fstab | `replace` — idempotentny (komentuje tylko aktywne wpisy) |
+
+Ponowne uruchomienie `ansible-playbook site.yml` na działającym klastrze jest bezpieczne.
+
+---
+
+## Dostęp do klastra
+
+```bash
+# Na masterze
+k3s kubectl get nodes -o wide
+k3s kubectl get pods -A
+
+# Lokalnie (po skopiowaniu kubeconfig)
+scp -i k8s_key root@10.4.0.50:/etc/rancher/k3s/k3s.yaml ~/.kube/config
+sed -i 's/127.0.0.1/10.4.0.50/' ~/.kube/config
 kubectl get nodes
 ```
 
-## WordPress Deployment
+---
 
-k3s ships with everything needed for WordPress out of the box:
-- **Traefik** — ingress controller with built-in Let's Encrypt (no certbot)
-- **local-path-provisioner** — automatic PersistentVolumes for DB storage
-- **CoreDNS** — internal DNS for service discovery
+## Co daje k3s out-of-the-box
+
+| Komponent | Opis |
+|-----------|------|
+| **containerd** | Container runtime (wbudowany w binarce k3s) |
+| **Flannel** | CNI — sieć podów (VXLAN, CIDR 10.42.0.0/16) |
+| **CoreDNS** | DNS wewnętrzny klastra |
+| **Traefik** | Ingress controller + automatyczny TLS (Let's Encrypt) |
+| **local-path-provisioner** | Automatyczne PersistentVolumes na dysku lokalnym |
+| **metrics-server** | `kubectl top nodes/pods` |
+| **etcd** | Wbudowana baza stanu klastra |
+
+---
+
+## Deployment WordPress (następne kroki)
+
+Po uruchomieniu klastra wystarczy zaaplikować manifesty lub Helm chart:
+
+```bash
+# Helm
+helm repo add bitnami https://charts.bitnami.com/bitnami
+helm install wordpress bitnami/wordpress \
+  --namespace wordpress --create-namespace \
+  --set ingress.enabled=true \
+  --set ingress.hostname=wordpress.example.com
+```
+
+Traefik automatycznie pobierze certyfikat Let's Encrypt dla podanej domeny.
