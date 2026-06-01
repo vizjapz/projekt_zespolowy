@@ -331,19 +331,3 @@ ansible-playbook dashboard.yml
 # Token zapisany w: dashboard-token.txt
 ```
 
----
-
-## Deployment WordPress (następne kroki)
-
-Po uruchomieniu klastra wystarczy zaaplikować manifesty lub Helm chart:
-
-```bash
-# Helm
-helm repo add bitnami https://charts.bitnami.com/bitnami
-helm install wordpress bitnami/wordpress \
-  --namespace wordpress --create-namespace \
-  --set ingress.enabled=true \
-  --set ingress.hostname=wordpress.example.com
-```
-
-Traefik automatycznie pobierze certyfikat Let's Encrypt dla podanej domeny.
