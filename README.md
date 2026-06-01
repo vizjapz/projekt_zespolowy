@@ -260,6 +260,44 @@ kubectl get nodes
 
 ---
 
+## Panele administracyjne
+
+| Panel | Adres | Dane logowania |
+|-------|-------|----------------|
+| **WordPress Panel** — deploy nowych instancji WordPress | `http://10.4.0.50:5000` | hasło z `group_vars/all.yml` → `panel_password` |
+| **Kubernetes Dashboard** — podgląd klastra (pody, namespace, logi) | `https://10.4.0.50:30443` | token z `dashboard-token.txt` (generowany przez `dashboard.yml`) |
+
+### WordPress Panel
+
+Prosty panel webowy do zarządzania instancjami WordPress na klastrze:
+- Logowanie hasłem (ustawiane w `group_vars/all.yml` → `panel_password`)
+- Formularz: domena + wersja PHP (8.2 / 8.3 / 8.4)
+- Automatyczny deploy: Namespace, MySQL, WordPress, Ingress
+- Automatyczny certyfikat TLS Let's Encrypt (HTTP-01 challenge przez Traefik)
+- Lista aktywnych instancji z statusem podów i certyfikatów
+- Usuwanie instancji wraz z danymi
+
+```bash
+# Deploy panelu
+ansible-playbook panel.yml
+
+# Zmiana hasła — edytuj group_vars/all.yml, następnie
+ansible-playbook panel.yml
+```
+
+### Kubernetes Dashboard
+
+Graficzny interfejs do podglądu stanu klastra (pody, namespace, logi, zasoby).
+
+```bash
+# Deploy dashboardu
+ansible-playbook dashboard.yml
+# Otwórz: https://10.4.0.50:30443
+# Token zapisany w: dashboard-token.txt
+```
+
+---
+
 ## Deployment WordPress (następne kroki)
 
 Po uruchomieniu klastra wystarczy zaaplikować manifesty lub Helm chart:
