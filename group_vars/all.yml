@@ -1,3 +1,6 @@
 ---
 k3s_server_ip: "{{ hostvars[groups['control_plane'][0]]['ansible_host'] }}"
 k3s_server_url: "https://{{ k3s_server_ip }}:6443"
+
+panel_password: "admin123"
+letsencrypt_email: "admin@bajt.io"

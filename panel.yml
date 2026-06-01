@@ -1,0 +1,5 @@
+---
+- name: Deploy WordPress panel
+  hosts: control_plane
+  roles:
+    - panel

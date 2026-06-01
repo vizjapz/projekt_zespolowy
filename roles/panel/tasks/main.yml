@@ -1,0 +1,76 @@
+---
+- name: Install Python dependencies
+  apt:
+    name:
+      - python3-pip
+      - python3-venv
+    state: present
+    update_cache: true
+
+- name: Create panel directory
+  file:
+    path: /opt/panel
+    state: directory
+    mode: '0755'
+
+- name: Copy panel application files
+  copy:
+    src: panel/
+    dest: /opt/panel/
+    mode: preserve
+
+- name: Install Python packages in virtualenv
+  pip:
+    requirements: /opt/panel/requirements.txt
+    virtualenv: /opt/panel/venv
+    virtualenv_command: python3 -m venv
+
+- name: Write panel config
+  copy:
+    dest: /etc/wp-panel.env
+    mode: '0600'
+    content: |
+      PANEL_PASSWORD={{ panel_password }}
+      LETSENCRYPT_EMAIL={{ letsencrypt_email }}
+
+- name: Deploy cert-manager
+  command: >
+    k3s kubectl apply -f
+    https://github.com/cert-manager/cert-manager/releases/download/v1.16.2/cert-manager.yaml
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: certmgr_result
+  changed_when: "'configured' in certmgr_result.stdout or 'created' in certmgr_result.stdout"
+
+- name: Wait for cert-manager webhook to be ready
+  command: >
+    k3s kubectl rollout status deployment/cert-manager-webhook
+    -n cert-manager --timeout=120s
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+- name: Copy ClusterIssuer manifest
+  template:
+    src: clusterissuer.yml.j2
+    dest: /tmp/clusterissuer.yml
+
+- name: Apply ClusterIssuer
+  command: k3s kubectl apply -f /tmp/clusterissuer.yml
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+- name: Create systemd service
+  template:
+    src: panel.service.j2
+    dest: /etc/systemd/system/wp-panel.service
+
+- name: Enable and start wp-panel
+  systemd:
+    name: wp-panel
+    state: restarted
+    enabled: true
+    daemon_reload: true
+
+- name: "[PANEL] Dostęp"
+  debug:
+    msg: "Panel dostępny pod: http://{{ ansible_host }}:5000  |  hasło: {{ panel_password }}"

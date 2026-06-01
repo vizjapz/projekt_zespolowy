@@ -1,0 +1,15 @@
+[Unit]
+Description=WordPress Panel
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/wp-panel.env
+ExecStart=/opt/panel/venv/bin/python /opt/panel/app.py
+WorkingDirectory=/opt/panel
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
